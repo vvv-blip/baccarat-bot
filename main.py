@@ -27,12 +27,12 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS", "0xabc...")
+CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS")
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1002588406897"))
 CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
 INFURA_URL = os.getenv("INFURA_URL", "https://sepolia.infura.io/v3/06b4b139092f4025b1c4f7e463b69b15")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://baccarat-bot-1e1e.onrender.com/webhook")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://baccarat-bot-1e1e.onrender.com")
 
 # Web3 setup
 try:
