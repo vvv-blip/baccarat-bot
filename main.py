@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS")
+CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS", "0xabc...")
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1002588406897"))
 CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
 INFURA_URL = os.getenv("INFURA_URL", "https://sepolia.infura.io/v3/06b4b139092f4025b1c4f7e463b69b15")
@@ -1101,7 +1101,7 @@ async def proceed_to_results(context, game_chat_id, game, players, player_bets, 
         f"{prize_text}\n"
         f"🚀 Ready for another round? Use /start!",
         parse_mode="Markdown",
-        )
+    )
     if game[1]:
         try:
             await context.bot.delete_message(game_chat_id, game[1])
@@ -1200,9 +1200,10 @@ async def root():
     return {"message": "Baccarat Bot API is running!", "status": "connected to Ethereum"}
 
 @application.post("/")
-async def root_post():
+async def root_post(request: Request):
     """Handle misdirected POST requests to root."""
-    logger.warning("Received POST request to root instead of /webhook")
+    body = await request.json()
+    logger.warning(f"Received POST to root instead of /webhook: body={json.dumps(body)}")
     return {"error": "Please use /webhook for Telegram updates"}
 
 @application.post("/webhook")
