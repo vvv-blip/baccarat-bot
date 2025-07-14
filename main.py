@@ -29,17 +29,24 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CONTRACT_ADDRESS = os.getenv("CONTRACT_ADDRESS", "0xabc...")
 GROUP_CHAT_ID = int(os.getenv("GROUP_CHAT_ID", "-1002588406897"))
-CREATOR_ID = int(os.getenv("CREATOR_ID", "your-user-id"))
+CREATOR_ID = int(os.getenv("CREATOR_ID", "0"))
 INFURA_URL = os.getenv("INFURA_URL", "https://sepolia.infura.io/v3/06b4b139092f4025b1c4f7e463b69b15")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g., https://your-bot.onrender.com/webhook
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://baccarat-bot-1e1e.onrender.com/webhook")
 
 # Web3 setup
-w3 = Web3(Web3.HTTPProvider(INFURA_URL))
-account = Account.from_key(PRIVATE_KEY)
-with open("contract_abi.json", "r") as f:
-    CONTRACT_ABI = json.load(f)
-contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
+try:
+    w3 = Web3(Web3.HTTPProvider(INFURA_URL))
+    if not w3.is_connected():
+        logger.error("Failed to connect to Ethereum node")
+        raise Exception("Web3 connection failed")
+    account = Account.from_key(PRIVATE_KEY) if PRIVATE_KEY else None
+    with open("contract_abi.json", "r") as f:
+        CONTRACT_ABI = json.load(f)
+    contract = w3.eth.contract(address=w3.to_checksum_address(CONTRACT_ADDRESS), abi=CONTRACT_ABI)
+except Exception as e:
+    logger.error(f"Web3 initialization failed: {e}")
+    raise Exception(f"Web3 initialization failed: {e}")
 
 # FastAPI app
 application = FastAPI()
@@ -397,7 +404,7 @@ def set_support_username(username):
         conn = sqlite3.connect("baccarat.db")
         c = conn.cursor()
         c.execute(
-            "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
             ("support_username", username),
         )
         conn.commit()
@@ -1186,11 +1193,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("❌ Invalid bet amount! Enter a number (e.g., 0.01).")
 
-# FastAPI webhook endpoint
+# FastAPI routes
+@application.get("/")
+async def root():
+    """Root endpoint for Render health checks."""
+    return {"message": "Baccarat Bot API is running!", "status": "connected to Ethereum"}
+
 @application.post("/webhook")
 async def webhook(request: Request):
+    """Handle Telegram webhook updates."""
     global telegram_app
     if telegram_app is None:
+        logger.error("Telegram application not initialized")
         raise HTTPException(status_code=500, detail="Telegram application not initialized")
     update = await request.json()
     update_obj = Update.de_json(update, telegram_app.bot)
