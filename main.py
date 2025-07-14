@@ -1101,7 +1101,7 @@ async def proceed_to_results(context, game_chat_id, game, players, player_bets, 
         f"{prize_text}\n"
         f"🚀 Ready for another round? Use /start!",
         parse_mode="Markdown",
-    )
+        )
     if game[1]:
         try:
             await context.bot.delete_message(game_chat_id, game[1])
@@ -1198,6 +1198,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def root():
     """Root endpoint for Render health checks."""
     return {"message": "Baccarat Bot API is running!", "status": "connected to Ethereum"}
+
+@application.post("/")
+async def root_post():
+    """Handle misdirected POST requests to root."""
+    logger.warning("Received POST request to root instead of /webhook")
+    return {"error": "Please use /webhook for Telegram updates"}
 
 @application.post("/webhook")
 async def webhook(request: Request):
