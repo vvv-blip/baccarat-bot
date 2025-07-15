@@ -19,14 +19,14 @@ from eth_account import Account
 from firebase_admin import credentials, firestore, initialize_app
 from fastapi import FastAPI, Request
 import uvicorn
-import telegram # Import telegram to access __version__
+import telegram
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Logging setup
 logging.basicConfig(
-    level=logging.INFO, # Changed to INFO for production, DEBUG can be too verbose
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -36,74 +36,34 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CONTRACT_ADDRESS = os.environ.get("CONTRACT_ADDRESS")
 INFURA_URL = os.environ.get("INFURA_URL")
 PRIVATE_KEY = os.environ.get("PRIVATE_KEY")
-GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID"))
-CREATOR_ID = int(os.environ.get("CREATOR_ID"))
+GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID", 0))
+CREATOR_ID = int(os.environ.get("CREATOR_ID", 0))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-PORT = int(os.environ.get("PORT", 8000)) # Default to 8000 if not set
+PORT = int(os.environ.get("PORT", 8000))
 
 # Validate essential environment variables
-if not all([TELEGRAM_TOKEN, CONTRACT_ADDRESS, INFURA_URL, PRIVATE_KEY, WEBHOOK_URL]):
-    logger.critical("One or more essential environment variables are missing. Please check your .env file or Render environment settings.")
+if not all([TELEGRAM_TOKEN, CONTRACT_ADDRESS, INFURA_URL, PRIVATE_KEY, GROUP_CHAT_ID, CREATOR_ID, WEBHOOK_URL]):
+    logger.critical("Missing essential environment variables. Check TELEGRAM_TOKEN, CONTRACT_ADDRESS, INFURA_URL, PRIVATE_KEY, GROUP_CHAT_ID, CREATOR_ID, WEBHOOK_URL.")
     exit(1)
 
 # Web3 setup
 try:
     w3 = Web3(Web3.HTTPProvider(INFURA_URL))
-    account = Account.from_key(PRIVATE_KEY)
-    # Ensure connection
     if not w3.is_connected():
         raise Exception("Failed to connect to Web3 provider.")
-
-    # Dummy ABI for demonstration. Replace with your actual contract_abi.json content.
-    # In a real scenario, you'd load this from a file or another environment variable.
-    CONTRACT_ABI = json.loads(os.environ.get("CONTRACT_ABI_JSON", """
-    [
-        {
-            "inputs": [],
-            "stateMutability": "nonpayable",
-            "type": "constructor"
-        },
-        {
-            "inputs": [],
-            "name": "deposit",
-            "outputs": [],
-            "stateMutability": "payable",
-            "type": "function"
-        },
-        {
-            "inputs": [
-                {
-                    "internalType": "uint256",
-                    "name": "amount",
-                    "type": "uint256"
-                }
-            ],
-            "name": "withdraw",
-            "outputs": [],
-            "stateMutability": "nonpayable",
-            "type": "function"
-        },
-        {
-            "inputs": [
-                {
-                    "internalType": "address",
-                    "name": "",
-                    "type": "address"
-                }
-            ],
-            "name": "balances",
-            "outputs": [
-                {
-                    "internalType": "uint256",
-                    "name": "",
-                    "type": "uint256"
-                }
-            ],
-            "stateMutability": "view",
-            "type": "function"
-        }
-    ]
-    """))
+    account = Account.from_key(PRIVATE_KEY)
+    
+    # Load contract ABI from file
+    try:
+        with open("contract_abi.json") as f:
+            CONTRACT_ABI = json.load(f)
+    except FileNotFoundError:
+        logger.critical("contract_abi.json not found in project root.")
+        exit(1)
+    except json.JSONDecodeError as e:
+        logger.critical(f"Invalid contract_abi.json format: {e}")
+        exit(1)
+    
     contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
     logger.info("Web3 and contract initialized successfully.")
 except Exception as e:
@@ -112,12 +72,7 @@ except Exception as e:
 
 # Firebase setup
 try:
-    # Use FIREBASE_CREDENTIALS_JSON environment variable
-    firebase_credentials_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
-    if not firebase_credentials_json:
-        raise ValueError("FIREBASE_CREDENTIALS_JSON environment variable is not set. Please ensure it's set on Render with your Firebase service account JSON.")
-    
-    cred = credentials.Certificate(json.loads(firebase_credentials_json))
+    cred = credentials.Certificate("firebase_credentials.json")
     initialize_app(cred)
     db = firestore.client()
     logger.info("Firebase initialized successfully.")
@@ -195,7 +150,7 @@ def determine_pvp_winner(card_choices, target_number):
     winners = [(uid, {"total": totals[uid]}) for uid, dist in distances.items() if dist == min_distance]
     return winners, totals
 
-async def process_pvp_payouts(chat_id, winners, bet_amount, player_bets):
+async def process_pvp_payouts(context, chat_id, winners, bet_amount, player_bets):
     if not winners or bet_amount == "0":
         return
     total_pool = float(bet_amount) * len(player_bets)
@@ -203,61 +158,83 @@ async def process_pvp_payouts(chat_id, winners, bet_amount, player_bets):
     prize_pool = total_pool - fee
     payout_per_winner = prize_pool / len(winners) if winners else 0
     try:
-        # Payout winners
         for user_id, _ in winners:
-            wallet = await get_wallet(int(user_id)) # user_id from JSON is string
-            if wallet:
-                address, private_key = wallet
-                user_account = Account.from_key(private_key)
-                nonce = w3.eth.get_transaction_count(account.address) # Bot's account for withdrawal
-                
-                # Ensure the contract has enough balance to withdraw
-                contract_balance = contract.functions.balances(account.address).call()
-                if contract_balance < w3.to_wei(payout_per_winner, "ether"):
-                    logger.error(f"Contract balance too low for payout: {contract_balance} < {w3.to_wei(payout_per_winner, 'ether')}")
-                    continue # Skip this payout if contract doesn't have funds
+            wallet = await get_wallet(int(user_id))
+            if not wallet:
+                logger.error(f"Wallet not found for user {user_id} during payout.")
+                await context.bot.send_message(user_id, "❌ Payout failed: Wallet not found. Contact support.")
+                continue
+            address, private_key = wallet
+            user_account = Account.from_key(private_key)
+            nonce = w3.eth.get_transaction_count(account.address)
+            
+            contract_balance = contract.functions.balances(account.address).call()
+            if contract_balance < w3.to_wei(payout_per_winner, "ether"):
+                logger.error(f"Contract balance too low for payout: {contract_balance} < {w3.to_wei(payout_per_winner, 'ether')}")
+                await context.bot.send_message(user_id, "❌ Payout failed: Insufficient contract funds. Contact support.")
+                continue
 
-                tx = contract.functions.withdraw(w3.to_wei(payout_per_winner, "ether")).build_transaction({
-                    "from": account.address, # Bot's address
-                    "nonce": nonce,
-                    "gas": 200000,
-                    "gasPrice": w3.to_wei("20", "gwei"),
-                })
-                signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY) # Use bot's private key
+            tx = contract.functions.withdraw(w3.to_wei(payout_per_winner, "ether")).build_transaction({
+                "from": account.address,
+                "nonce": nonce,
+                "gas": 200000,
+                "gasPrice": w3.to_wei("20", "gwei"),
+            })
+            signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+            try:
                 tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-                w3.eth.wait_for_transaction_receipt(tx_hash)
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+                if receipt.status == 0:
+                    logger.error(f"Payout transaction failed for user {user_id}: Tx {tx_hash.hex()}")
+                    await context.bot.send_message(user_id, "❌ Payout transaction failed. Contact support.")
+                    continue
                 logger.info(f"Processed payout for user {user_id}: {payout_per_winner} ETH. Tx: {tx_hash.hex()}")
+                await context.bot.send_message(user_id, f"🎉 Payout of {payout_per_winner:.4f} ETH processed! Tx: {tx_hash.hex()}")
+            except Exception as tx_e:
+                logger.error(f"Payout transaction failed for user {user_id}: {tx_e}")
+                await context.bot.send_message(user_id, f"❌ Payout failed: {str(tx_e)}. Contact support.")
         
-        # Refund non-winners if no winners (e.g., if all picked 0 and target was 5)
         if not winners:
             for user_id_str in player_bets:
                 user_id = int(user_id_str)
                 wallet = await get_wallet(user_id)
-                if wallet:
-                    address, private_key = wallet
-                    user_account = Account.from_key(private_key)
-                    nonce = w3.eth.get_transaction_count(account.address) # Bot's account for refund
-                    refund_amount = float(bet_amount) * 0.95 # Refund 95% of bet
-                    
-                    contract_balance = contract.functions.balances(account.address).call()
-                    if contract_balance < w3.to_wei(refund_amount, "ether"):
-                        logger.error(f"Contract balance too low for refund: {contract_balance} < {w3.to_wei(refund_amount, 'ether')}")
-                        continue # Skip this refund if contract doesn't have funds
+                if not wallet:
+                    logger.error(f"Wallet not found for user {user_id} during refund.")
+                    await context.bot.send_message(user_id, "❌ Refund failed: Wallet not found. Contact support.")
+                    continue
+                address, private_key = wallet
+                user_account = Account.from_key(private_key)
+                nonce = w3.eth.get_transaction_count(account.address)
+                refund_amount = float(bet_amount) * 0.95
+                
+                contract_balance = contract.functions.balances(account.address).call()
+                if contract_balance < w3.to_wei(refund_amount, "ether"):
+                    logger.error(f"Contract balance too low for refund: {contract_balance} < {w3.to_wei(refund_amount, 'ether')}")
+                    await context.bot.send_message(user_id, "❌ Refund failed: Insufficient contract funds. Contact support.")
+                    continue
 
-                    tx = contract.functions.withdraw(w3.to_wei(refund_amount, "ether")).build_transaction({
-                        "from": account.address, # Bot's address
-                        "nonce": nonce,
-                        "gas": 200000,
-                        "gasPrice": w3.to_wei("20", "gwei"),
-                    })
-                    signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY) # Use bot's private key
+                tx = contract.functions.withdraw(w3.to_wei(refund_amount, "ether")).build_transaction({
+                    "from": account.address,
+                    "nonce": nonce,
+                    "gas": 200000,
+                    "gasPrice": w3.to_wei("20", "gwei"),
+                })
+                signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+                try:
                     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-                    w3.eth.wait_for_transaction_receipt(tx_hash)
+                    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+                    if receipt.status == 0:
+                        logger.error(f"Refund transaction failed for user {user_id}: Tx {tx_hash.hex()}")
+                        await context.bot.send_message(user_id, "❌ Refund transaction failed. Contact support.")
+                        continue
                     logger.info(f"Processed refund for user {user_id}: {refund_amount} ETH. Tx: {tx_hash.hex()}")
-
+                    await context.bot.send_message(user_id, f"✅ Refund of {refund_amount:.4f} ETH processed! Tx: {tx_hash.hex()}")
+                except Exception as tx_e:
+                    logger.error(f"Refund transaction failed for user {user_id}: {tx_e}")
+                    await context.bot.send_message(user_id, f"❌ Refund failed: {str(tx_e)}. Contact support.")
     except Exception as e:
         logger.error(f"Error in process_pvp_payouts: chat_id={chat_id}, error={e}")
-
+        await context.bot.send_message(chat_id, "❌ Error processing payouts. Contact support.")
 
 def card_to_string(card):
     if card == 1:
@@ -277,7 +254,6 @@ async def get_game(chat_id):
         doc = doc_ref.get()
         if doc.exists:
             game_data = doc.to_dict()
-            # Convert JSON strings back to Python objects
             if 'players' in game_data and isinstance(game_data['players'], str):
                 game_data['players'] = json.loads(game_data['players'])
             if 'player_bets' in game_data and isinstance(game_data['player_bets'], str):
@@ -297,7 +273,6 @@ async def get_game(chat_id):
 async def update_game(chat_id, **kwargs):
     try:
         doc_ref = db.collection("games").document(str(chat_id))
-        # Convert Python objects to JSON strings before saving
         for k, v in kwargs.items():
             if isinstance(v, (list, dict)):
                 kwargs[k] = json.dumps(v)
@@ -308,14 +283,15 @@ async def update_game(chat_id, **kwargs):
 
 async def delete_game(chat_id):
     try:
-        # Delete game document
         db.collection("games").document(str(chat_id)).delete()
-        # Delete related pending bets
         pending_bets_ref = db.collection("pending_bets")
         query = pending_bets_ref.where("chat_id", "==", chat_id).stream()
         for doc in query:
             doc.reference.delete()
-        logger.info(f"delete_game: chat_id={chat_id}")
+        job_name = f"timeout_{chat_id}"
+        for job in application.job_queue.get_jobs_by_name(job_name):
+            job.schedule_removal()
+        logger.info(f"delete_game: chat_id={chat_id}, cleaned up jobs")
     except Exception as e:
         logger.error(f"Error in delete_game: chat_id={chat_id}, error={e}")
 
@@ -355,7 +331,7 @@ async def add_pending_bet(chat_id, user_id, amount):
     except Exception as e:
         logger.error(f"Error in add_pending_bet: chat_id={chat_id}, user_id={user_id}, error={e}")
 
-async def process_pending_bets(chat_id):
+async def process_pending_bets(context, chat_id):
     try:
         pending_bets_ref = db.collection("pending_bets")
         query = pending_bets_ref.where("chat_id", "==", chat_id).stream()
@@ -367,49 +343,54 @@ async def process_pending_bets(chat_id):
             amount = bet["amount"]
             
             wallet = await get_wallet(user_id)
-            if wallet:
-                address, private_key = wallet
-                user_account = Account.from_key(private_key)
-                
-                # Check if the user's wallet has enough balance to deposit
-                user_balance_wei = w3.eth.get_balance(user_account.address)
-                required_wei = w3.to_wei(amount, "ether")
-                
-                if user_balance_wei < required_wei:
-                    logger.warning(f"User {user_id} (address: {user_account.address}) has insufficient balance for deposit. Required: {w3.from_wei(required_wei, 'ether')} ETH, Has: {w3.from_wei(user_balance_wei, 'ether')} ETH")
-                    # Optionally, notify the user about insufficient funds
-                    # await context.bot.send_message(user_id, "Insufficient funds for your bet. Please fund your wallet.")
-                    continue # Skip this bet if user doesn't have funds
-
-                try:
-                    nonce = w3.eth.get_transaction_count(user_account.address)
-                    tx = contract.functions.deposit().build_transaction({
-                        "from": user_account.address,
-                        "value": required_wei,
-                        "nonce": nonce,
-                        "gas": 200000,
-                        "gasPrice": w3.to_wei("20", "gwei"),
-                    })
-                    signed_tx = w3.eth.account.sign_transaction(tx, private_key)
-                    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-                    w3.eth.wait_for_transaction_receipt(tx_hash)
-                    logger.info(f"Processed deposit for user {user_id}: {amount} ETH. Tx: {tx_hash.hex()}")
-                    bets_to_delete.append(doc.reference) # Mark for deletion only if successful
-                except Exception as tx_e:
-                    logger.error(f"Transaction failed for user {user_id}, amount {amount}: {tx_e}")
-            else:
+            if not wallet:
                 logger.warning(f"Wallet not found for user {user_id} during pending bet processing.")
-                bets_to_delete.append(doc.reference) # Delete pending bet if wallet not found
+                await context.bot.send_message(user_id, "❌ Bet failed: Wallet not found. Use /start to create one.")
+                bets_to_delete.append(doc.reference)
+                continue
 
-        # Delete all processed bets in a batch
+            address, private_key = wallet
+            user_account = Account.from_key(private_key)
+            user_balance_wei = w3.eth.get_balance(user_account.address)
+            required_wei = w3.to_wei(amount, "ether")
+            
+            if user_balance_wei < required_wei:
+                logger.warning(f"User {user_id} (address: {user_account.address}) has insufficient balance. Required: {w3.from_wei(required_wei, 'ether')} ETH, Has: {w3.from_wei(user_balance_wei, 'ether')} ETH")
+                await context.bot.send_message(user_id, f"❌ Insufficient funds for bet of {amount} ETH. Fund your wallet with Sepolia ETH.")
+                bets_to_delete.append(doc.reference)
+                continue
+
+            try:
+                nonce = w3.eth.get_transaction_count(user_account.address)
+                tx = contract.functions.deposit().build_transaction({
+                    "from": user_account.address,
+                    "value": required_wei,
+                    "nonce": nonce,
+                    "gas": 200000,
+                    "gasPrice": w3.to_wei("20", "gwei"),
+                })
+                signed_tx = w3.eth.account.sign_transaction(tx, private_key)
+                tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+                if receipt.status == 0:
+                    logger.error(f"Deposit transaction failed for user {user_id}: Tx {tx_hash.hex()}")
+                    await context.bot.send_message(user_id, "❌ Deposit transaction failed. Contact support.")
+                    continue
+                logger.info(f"Processed deposit for user {user_id}: {amount} ETH. Tx: {tx_hash.hex()}")
+                bets_to_delete.append(doc.reference)
+            except Exception as tx_e:
+                logger.error(f"Deposit transaction failed for user {user_id}, amount {amount}: {tx_e}")
+                await context.bot.send_message(user_id, f"❌ Deposit failed: {str(tx_e)}. Contact support.")
+                bets_to_delete.append(doc.reference)
+
         batch = db.batch()
         for ref in bets_to_delete:
             batch.delete(ref)
         batch.commit()
         logger.info(f"Deleted {len(bets_to_delete)} pending bets for chat_id={chat_id}")
-
     except Exception as e:
         logger.error(f"Error in process_pending_bets: chat_id={chat_id}, error={e}")
+        await context.bot.send_message(chat_id, "❌ Error processing bets. Contact support.")
 
 async def get_username(user_id):
     try:
@@ -492,7 +473,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.debug(f"Waiting game found: chat_id={chat_id}")
             await update.message.reply_text("🎲 A game is already in progress! Join now! 🚀")
             return
-        # Delete any finished or stale game
         if game:
             logger.info(f"Cleaning up old game: chat_id={chat_id}, status={game.get('status')}")
             if game.get("message_id"):
@@ -528,19 +508,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await context.bot.pin_chat_message(chat_id, message.message_id)
             
-            # Initialize game state in Firestore
             game_data = {
                 "chat_id": chat_id,
                 "message_id": message.message_id,
                 "creator_id": user_id,
                 "bet_amount": "0",
-                "players": json.dumps([]), # Store as JSON string
+                "players": json.dumps([]),
                 "player_count": 0,
                 "test_mode": 0,
                 "status": "waiting",
-                "player_bets": json.dumps({}), # Store as JSON string
-                "game_state": json.dumps({}), # Store as JSON string
-                "card_choices": json.dumps({}), # Store as JSON string
+                "player_bets": json.dumps({}),
+                "game_state": json.dumps({}),
+                "card_choices": json.dumps({}),
                 "game_mode": "interactive",
                 "target_number": 0
             }
@@ -630,7 +609,7 @@ async def who_made_the_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def timeout_card_selection(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
-    chat_id = job_data # The job data is the chat_id
+    chat_id = job_data
     game = await get_game(chat_id)
     if not game or game.get("status") != "card_selection":
         logger.debug(f"Timeout check: No game or not in card_selection for chat_id={chat_id}")
@@ -658,7 +637,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     logger.debug(f"Button pressed: data={data}, chat_id={chat_id}, user_id={user_id}")
 
-    # Handle private chat callbacks (non-betting, non-card)
     if data in ["view_wallet", "how_to_play", "tutorial_interactive"]:
         if data == "view_wallet":
             wallet = await get_wallet(user_id)
@@ -705,7 +683,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # Handle betting callbacks
     if data.startswith("bet_"):
         try:
             parts = data.split("_")
@@ -772,7 +749,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="Markdown",
                         reply_markup=reply_markup,
                     )
-                # Start card selection timeout (30 seconds)
                 context.job_queue.run_once(timeout_card_selection, 30, data=game_chat_id, name=f"timeout_{game_chat_id}")
             else:
                 await update_game(game_chat_id, status="playing")
@@ -786,13 +762,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await proceed_to_results(context, game_chat_id, game, players, player_bets, player_cards, banker_cards)
         return
 
-    # Handle card selection callbacks (Interactive Mode)
     if data.startswith("card_select_"):
         logger.debug(f"Raw card callback data: {data}")
         try:
-            logger.debug(f"Attempting to split callback data: {data}")
             parts = data.split("_")
-            logger.debug(f"Split result: parts={parts}")
             if len(parts) != 4 or parts[0] != "card" or parts[1] != "select":
                 raise ValueError("Invalid callback data format for card selection")
             card = parts[2]
@@ -808,9 +781,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ No active game! Start one with /start in the group.")
             return
         if game.get("status") != "card_selection":
-            logger.warning(f"Game not in card_selection state: status={game.get('status')}, chat_id={game_chat_id}, game={game}")
+            logger.warning(f"Game not in card_selection state: status={game.get('status')}, chat_id={game_chat_id}")
             await query.message.reply_text("❌ Card selection phase is over or game is not ready! Try starting a new game.")
-            # Reset game to prevent stale state
             if game.get("message_id"):
                 try:
                     await context.bot.delete_message(game_chat_id, game["message_id"])
@@ -841,13 +813,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
         
-        # Cancel the timeout job if it exists and all players have chosen
         job_name = f"timeout_{game_chat_id}"
         current_jobs = context.job_queue.get_jobs_by_name(job_name)
         for job in current_jobs:
             job.schedule_removal()
             logger.info(f"Removed timeout job {job_name} for chat_id={game_chat_id}")
-
 
         players = game.get("players", [])
         player_bets = game.get("player_bets", {})
@@ -856,7 +826,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await proceed_to_results(context, game_chat_id, game, players, player_bets, None, None)
         return
 
-    # Handle group chat callbacks
     game = await get_game(chat_id)
     if not game:
         logger.error(f"No game found for group chat_id={chat_id}")
@@ -983,7 +952,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         players.append(user_id)
-        await update_game(chat_id, players=players, player_count=len(players)) # players is list, not JSON string here
+        await update_game(chat_id, players=players, player_count=len(players))
         
         old_message_id = game.get("message_id")
         keyboard = [
@@ -994,7 +963,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(keyboard)
         new_message = await context.bot.send_message(
             chat_id,
-            f"🎰 **Bakuchi-ba**🌟\n"
+            f"🎰 **Bakuchi-ba** 🌟\n"
             f"🔥 **{'Free Play' if game.get('bet_amount') == '0' else 'Betting'} Mode!** {'🧪 Test Mode! ' if test_mode else ''}🚀\n"
             f"💰 **Bet**: {game.get('bet_amount')} ETH\n"
             f"👥 **Players**: {len(players)}/{max_players}\n"
@@ -1030,7 +999,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
                 reply_markup=reply_markup,
             )
-        else: # Interactive mode
+        else:
             keyboard = [
                 [InlineKeyboardButton("✅ Confirm Bet", callback_data=f"bet_none_{chat_id}")]
             ]
@@ -1104,38 +1073,51 @@ async def proceed_to_results(context, game_chat_id, game, players, player_bets, 
         winners = [(uid, bet) for uid, bet in player_bets.items() if bet["choice"] == result]
         
         if game.get("bet_amount") != "0":
-            await process_pending_bets(game_chat_id) # Process deposits first
+            await process_pending_bets(context, game_chat_id)
             for user_id_str, bet in winners:
                 user_id = int(user_id_str)
                 wallet = await get_wallet(user_id)
-                if wallet:
-                    address, private_key = wallet
-                    user_account = Account.from_key(private_key)
-                    nonce = w3.eth.get_transaction_count(account.address) # Bot's account for withdrawal
-                    payout = 0.0
-                    if bet["choice"] == "Banker":
-                        payout = float(bet["amount"]) * 1.95
-                    elif bet["choice"] == "Player":
-                        payout = float(bet["amount"]) * 2
-                    elif bet["choice"] == "Tie":
-                        payout = float(bet["amount"]) * 9
-                    
-                    contract_balance = contract.functions.balances(account.address).call()
-                    if contract_balance < w3.to_wei(payout, "ether"):
-                        logger.error(f"Contract balance too low for payout: {contract_balance} < {w3.to_wei(payout, 'ether')}")
-                        continue # Skip this payout if contract doesn't have funds
+                if not wallet:
+                    logger.error(f"Wallet not found for user {user_id} during payout.")
+                    await context.bot.send_message(user_id, "❌ Payout failed: Wallet not found. Contact support.")
+                    continue
+                address, private_key = wallet
+                user_account = Account.from_key(private_key)
+                nonce = w3.eth.get_transaction_count(account.address)
+                payout = 0.0
+                if bet["choice"] == "Banker":
+                    payout = float(bet["amount"]) * 1.95
+                elif bet["choice"] == "Player":
+                    payout = float(bet["amount"]) * 2
+                elif bet["choice"] == "Tie":
+                    payout = float(bet["amount"]) * 9
+                
+                contract_balance = contract.functions.balances(account.address).call()
+                if contract_balance < w3.to_wei(payout, "ether"):
+                    logger.error(f"Contract balance too low for payout: {contract_balance} < {w3.to_wei(payout, 'ether')}")
+                    await context.bot.send_message(user_id, "❌ Payout failed: Insufficient contract funds. Contact support.")
+                    continue
 
-                    tx = contract.functions.withdraw(w3.to_wei(payout, "ether")).build_transaction({
-                        "from": account.address, # Bot's address
-                        "nonce": nonce,
-                        "gas": 200000,
-                        "gasPrice": w3.to_wei("20", "gwei"),
-                    })
-                    signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY) # Use bot's private key
+                tx = contract.functions.withdraw(w3.to_wei(payout, "ether")).build_transaction({
+                    "from": account.address,
+                    "nonce": nonce,
+                    "gas": 200000,
+                    "gasPrice": w3.to_wei("20", "gwei"),
+                })
+                signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
+                try:
                     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-                    w3.eth.wait_for_transaction_receipt(tx_hash)
+                    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+                    if receipt.status == 0:
+                        logger.error(f"Payout transaction failed for user {user_id}: Tx {tx_hash.hex()}")
+                        await context.bot.send_message(user_id, "❌ Payout transaction failed. Contact support.")
+                        continue
                     logger.info(f"Processed payout for user {user_id}: {payout} ETH. Tx: {tx_hash.hex()}")
-    else: # Interactive mode
+                    await context.bot.send_message(user_id, f"🎉 Payout of {payout:.4f} ETH processed! Tx: {tx_hash.hex()}")
+                except Exception as tx_e:
+                    logger.error(f"Payout transaction failed for user {user_id}: {tx_e}")
+                    await context.bot.send_message(user_id, f"❌ Payout failed: {str(tx_e)}. Contact support.")
+    else:
         card_choices = game.get("card_choices", {})
         target_number = game.get("target_number")
         winners, totals = determine_pvp_winner(card_choices, target_number)
@@ -1165,8 +1147,8 @@ async def proceed_to_results(context, game_chat_id, game, players, player_bets, 
                 parse_mode="Markdown",
             )
         if game.get("bet_amount") != "0":
-            await process_pending_bets(game_chat_id) # Process deposits first
-            await process_pvp_payouts(game_chat_id, winners, game.get("bet_amount"), player_bets)
+            await process_pending_bets(context, game_chat_id)
+            await process_pvp_payouts(context, game_chat_id, winners, game.get("bet_amount"), player_bets)
         result = "No winners" if not winners else "Winners determined"
 
     winner_tags = []
@@ -1199,7 +1181,6 @@ async def proceed_to_results(context, game_chat_id, game, players, player_bets, 
             logger.warning(f"Failed to delete message: message_id={game['message_id']}, error={e}")
     await delete_game(game_chat_id)
     
-    # Re-create the initial game message for the group
     keyboard = [
         [
             InlineKeyboardButton("🎮 Start Game", callback_data="start_game"),
@@ -1210,7 +1191,7 @@ async def proceed_to_results(context, game_chat_id, game, players, player_bets, 
             InlineKeyboardButton("📊 Stats", callback_data="group_stats"),
         ],
     ]
-    if CREATOR_ID in players: # Check if creator was in the *last* game
+    if CREATOR_ID in players:
         keyboard.append([InlineKeyboardButton("🧪 Test Mode", callback_data="test_mode")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
@@ -1219,18 +1200,17 @@ async def proceed_to_results(context, game_chat_id, game, players, player_bets, 
             "🎰 **Bakuchi-ba** 🌟\n"
             "🔥 **Ready to Play?** No game running yet! 🚀\n"
             "💰 **Bet**: 0 ETH\n"
-            f"👥 **Players**: 0/{4 if game.get('game_mode') == 'interactive' else 8}\n" # Default max players for new game
+            f"👥 **Players**: 0/{4 if game.get('game_mode') == 'interactive' else 8}\n"
             "🎲 Start a game or check the rules below! 🏆",
             parse_mode="Markdown",
             reply_markup=reply_markup,
         )
         await context.bot.pin_chat_message(game_chat_id, new_message.message_id)
         
-        # Initialize new game state in Firestore
         new_game_data = {
             "chat_id": game_chat_id,
             "message_id": new_message.message_id,
-            "creator_id": CREATOR_ID, # Set creator to bot owner for new game prompt
+            "creator_id": CREATOR_ID,
             "bet_amount": "0",
             "players": json.dumps([]),
             "player_count": 0,
@@ -1239,7 +1219,7 @@ async def proceed_to_results(context, game_chat_id, game, players, player_bets, 
             "player_bets": json.dumps({}),
             "game_state": json.dumps({}),
             "card_choices": json.dumps({}),
-            "game_mode": "interactive", # Default to interactive for new game prompt
+            "game_mode": "interactive",
             "target_number": 0
         }
         await update_game(game_chat_id, **new_game_data)
@@ -1259,7 +1239,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if game.get("status") == "setting_bet" and user_id == game.get("creator_id"):
         try:
-            bet = str(float(text))
+            bet_amount = float(text)
+            if bet_amount <= 0 or bet_amount > 100:
+                await update.message.reply_text("❌ Bet amount must be between 0.001 and 100 ETH!")
+                return
+            bet = str(bet_amount)
             logger.info(f"Bet amount set: {bet} ETH, chat_id={chat_id}, user_id={user_id}")
             await update_game(chat_id, bet_amount=bet, status="waiting")
             max_players = 2 if game.get("test_mode") else (4 if game.get("game_mode") == "interactive" else 8)
@@ -1291,8 +1275,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid bet amount! Enter a number (e.g., 0.01).")
 
 # Setup the Telegram Application
-# Build the Application without any explicit webhook or update configuration in the builder.
-# We will rely solely on application.bot.set_webhook() in the FastAPI startup.
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 # Add handlers
@@ -1310,7 +1292,7 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def on_startup():
-    logger.info(f"python-telegram-bot version: {telegram.__version__}") # Log version for debugging
+    logger.info(f"python-telegram-bot version: {telegram.__version__}")
     logger.info("Setting webhook...")
     await application.bot.set_webhook(url=WEBHOOK_URL)
     logger.info(f"Webhook set to: {WEBHOOK_URL}")
@@ -1322,9 +1304,5 @@ async def telegram_webhook(request: Request):
     await application.process_update(update)
     return {"message": "OK"}
 
-# Main function to run the FastAPI app
 if __name__ == "__main__":
-    # This is for local testing with uvicorn. Render will handle running the app via Procfile.
-    # For Render, the Procfile will point to `uvicorn main:app --host 0.0.0.0 --port $PORT`
     uvicorn.run(app, host="0.0.0.0", port=PORT)
-
