@@ -40,10 +40,11 @@ GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID", 0))
 CREATOR_ID = int(os.environ.get("CREATOR_ID", 0))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 8000))
+FIREBASE_CREDENTIALS_JSON = os.environ.get("FIREBASE_CREDENTIALS_JSON")
 
 # Validate essential environment variables
-if not all([TELEGRAM_TOKEN, CONTRACT_ADDRESS, INFURA_URL, PRIVATE_KEY, GROUP_CHAT_ID, CREATOR_ID, WEBHOOK_URL]):
-    logger.critical("Missing essential environment variables. Check TELEGRAM_TOKEN, CONTRACT_ADDRESS, INFURA_URL, PRIVATE_KEY, GROUP_CHAT_ID, CREATOR_ID, WEBHOOK_URL.")
+if not all([TELEGRAM_TOKEN, CONTRACT_ADDRESS, INFURA_URL, PRIVATE_KEY, GROUP_CHAT_ID, CREATOR_ID, WEBHOOK_URL, FIREBASE_CREDENTIALS_JSON]):
+    logger.critical("Missing essential environment variables. Check TELEGRAM_TOKEN, CONTRACT_ADDRESS, INFURA_URL, PRIVATE_KEY, GROUP_CHAT_ID, CREATOR_ID, WEBHOOK_URL, FIREBASE_CREDENTIALS_JSON.")
     exit(1)
 
 # Web3 setup
@@ -72,10 +73,13 @@ except Exception as e:
 
 # Firebase setup
 try:
-    cred = credentials.Certificate("firebase_credentials.json")
+    cred = credentials.Certificate(json.loads(FIREBASE_CREDENTIALS_JSON))
     initialize_app(cred)
     db = firestore.client()
     logger.info("Firebase initialized successfully.")
+except json.JSONDecodeError as e:
+    logger.critical(f"Invalid FIREBASE_CREDENTIALS_JSON format: {e}")
+    exit(1)
 except Exception as e:
     logger.critical(f"Firebase initialization failed: {e}")
     exit(1)
