@@ -1,6 +1,12 @@
-python-telegram-bot==20.7
-web3==6.19.0
+python-telegram-bot[job-queue]==21.2
+web3==6.20.0  # Added for Web3 functionality
+firebase-admin==6.5.0 # Added for Firebase integration
+fastapi==0.111.0 # Added for FastAPI web framework
+requests==2.32.3
+gunicorn==23.0.0
 python-dotenv==1.0.1
-firebase-admin==6.5.0
-fastapi==0.111.0
-uvicorn==0.29.0
+asgiref==3.8.1
+uvicorn==0.32.0
+httpx==0.27.0
+# Removed flask as it's not used by the bot
+
