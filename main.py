@@ -114,7 +114,7 @@ try:
     # Use FIREBASE_CREDENTIALS_JSON environment variable
     firebase_credentials_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
     if not firebase_credentials_json:
-        raise ValueError("FIREBASE_CREDENTIALS_JSON environment variable is not set.")
+        raise ValueError("FIREBASE_CREDENTIALS_JSON environment variable is not set. Please ensure it's set on Render with your Firebase service account JSON.")
     
     cred = credentials.Certificate(json.loads(firebase_credentials_json))
     initialize_app(cred)
@@ -1290,7 +1290,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid bet amount! Enter a number (e.g., 0.01).")
 
 # Setup the Telegram Application
-application = Application.builder().token(TELEGRAM_TOKEN).build()
+# Use .no_updates() to prevent the Application from setting up internal polling mechanisms,
+# as FastAPI will handle the incoming webhook requests.
+application = Application.builder().token(TELEGRAM_TOKEN).no_updates().build()
 
 # Add handlers
 application.add_handler(CommandHandler("start", start, filters=filters.ChatType.GROUPS))
