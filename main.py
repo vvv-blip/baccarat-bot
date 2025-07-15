@@ -1290,9 +1290,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid bet amount! Enter a number (e.g., 0.01).")
 
 # Setup the Telegram Application
-# Use .no_updates() to prevent the Application from setting up internal polling mechanisms,
+# Use update_queue=None and updater=None to prevent the Application from setting up internal polling mechanisms,
 # as FastAPI will handle the incoming webhook requests.
-application = Application.builder().token(TELEGRAM_TOKEN).no_updates().build()
+application = Application.builder().token(TELEGRAM_TOKEN).build(update_queue=None, updater=None)
 
 # Add handlers
 application.add_handler(CommandHandler("start", start, filters=filters.ChatType.GROUPS))
