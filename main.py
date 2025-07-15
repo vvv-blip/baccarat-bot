@@ -19,6 +19,7 @@ from eth_account import Account
 from firebase_admin import credentials, firestore, initialize_app
 from fastapi import FastAPI, Request
 import uvicorn
+import telegram # Import telegram to access __version__
 
 # Load environment variables from .env file
 load_dotenv()
@@ -814,7 +815,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     await context.bot.delete_message(game_chat_id, game["message_id"])
                 except Exception as e:
-                    logger.warning(f"Failed to delete message on reset: message_id={game['message_id']}, error={e}")
+                    logger.warning(f"Failed to delete message: message_id={game['message_id']}, error={e}")
             await delete_game(game_chat_id)
             return
         card_choices = game.get("card_choices", {})
@@ -1290,8 +1291,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid bet amount! Enter a number (e.g., 0.01).")
 
 # Setup the Telegram Application
-# Configure webhook directly using .webhook_url()
-application = Application.builder().token(TELEGRAM_TOKEN).webhook_url(WEBHOOK_URL).build()
+# Build the Application without any explicit webhook or update configuration in the builder.
+# We will rely solely on application.bot.set_webhook() in the FastAPI startup.
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 # Add handlers
 application.add_handler(CommandHandler("start", start, filters=filters.ChatType.GROUPS))
@@ -1308,10 +1310,8 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def on_startup():
+    logger.info(f"python-telegram-bot version: {telegram.__version__}") # Log version for debugging
     logger.info("Setting webhook...")
-    # The webhook is already configured in the Application builder,
-    # but we can ensure it's set here again if needed, or remove this line.
-    # For robustness, keeping it here as a final check.
     await application.bot.set_webhook(url=WEBHOOK_URL)
     logger.info(f"Webhook set to: {WEBHOOK_URL}")
 
