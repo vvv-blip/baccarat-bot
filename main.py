@@ -1290,9 +1290,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid bet amount! Enter a number (e.g., 0.01).")
 
 # Setup the Telegram Application
-# Use update_queue=None and updater=None to prevent the Application from setting up internal polling mechanisms,
-# as FastAPI will handle the incoming webhook requests.
-application = Application.builder().token(TELEGRAM_TOKEN).build(update_queue=None, updater=None)
+# Configure webhook directly using .webhook_url()
+application = Application.builder().token(TELEGRAM_TOKEN).webhook_url(WEBHOOK_URL).build()
 
 # Add handlers
 application.add_handler(CommandHandler("start", start, filters=filters.ChatType.GROUPS))
@@ -1310,6 +1309,9 @@ app = FastAPI()
 @app.on_event("startup")
 async def on_startup():
     logger.info("Setting webhook...")
+    # The webhook is already configured in the Application builder,
+    # but we can ensure it's set here again if needed, or remove this line.
+    # For robustness, keeping it here as a final check.
     await application.bot.set_webhook(url=WEBHOOK_URL)
     logger.info(f"Webhook set to: {WEBHOOK_URL}")
 
